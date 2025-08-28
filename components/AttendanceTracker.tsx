@@ -1,11 +1,13 @@
 import React, { useState, useMemo, useCallback, FormEvent, useEffect } from 'react';
 import { AttendanceMember, AttendanceStatus, AttendanceStatusEnum } from '../types';
 import { supabase } from '../lib/supabaseClient';
+import { ConfirmationModal } from './ConfirmationModal';
 
 // --- ICONS ---
 const ChevronLeftIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>;
 const ChevronRightIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>;
 const PlusIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>;
+const TrashIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>;
 
 // --- HELPERS ---
 const formatDateKey = (date: Date): string => date.toISOString().split('T')[0];
@@ -21,13 +23,16 @@ interface AttendanceTrackerProps {
 
 export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin }) => {
     const [members, setMembers] = useState<AttendanceMember[]>([]);
-    const [currentDate, setCurrentDate] = useState(new Date(2025, 6, 1)); // Start at July 2025
+    const [currentDate, setCurrentDate] = useState(new Date());
     const [isAddingMember, setIsAddingMember] = useState(false);
     const [newMemberName, setNewMemberName] = useState('');
     const [isLoadingData, setIsLoadingData] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [editingMemberId, setEditingMemberId] = useState<number | null>(null);
     const [editingMemberName, setEditingMemberName] = useState('');
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [memberToDelete, setMemberToDelete] = useState<number | null>(null);
+    
 
     const fetchMembers = useCallback(async () => {
       setIsLoadingData(true);
@@ -91,11 +96,7 @@ export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin })
     }, [fetchMembers]);
 
 
-    const isFirstMonth = useMemo(() => {
-        const year = currentDate.getFullYear();
-        const month = currentDate.getMonth();
-        return year === 2025 && month === 6; // July is 6
-    }, [currentDate]);
+    
 
     const thursdaysInMonth = useMemo(() => {
         const dates: Date[] = [];
@@ -204,6 +205,38 @@ export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin })
       }
     };
 
+    const handleDeleteMember = (memberId: number) => {
+        if (!isAdmin) return;
+        setMemberToDelete(memberId);
+        setIsDeleteModalOpen(true);
+    };
+
+    const confirmDeleteMember = useCallback(async () => {
+        if (!memberToDelete) return;
+
+        try {
+            // Delete attendance
+            const { error: attendanceError } = await supabase.from('attendance').delete().eq('member_id', memberToDelete);
+            if (attendanceError) throw attendanceError;
+
+            // Delete fees
+            const { error: feesError } = await supabase.from('fees').delete().eq('member_id', memberToDelete);
+            if (feesError) throw feesError;
+
+            // Delete member
+            const { error: memberError } = await supabase.from('members').delete().eq('id', memberToDelete);
+            if (memberError) throw memberError;
+
+            setMembers(prevMembers => prevMembers.filter(m => m.id !== memberToDelete));
+
+        } catch (error: any) {
+            console.error("Error deleting member:", error.message);
+            setError(`Failed to delete member. Message: ${error.message}`);
+        }
+        setIsDeleteModalOpen(false);
+        setMemberToDelete(null);
+    }, [memberToDelete, fetchMembers]);
+
     const ErrorDisplay = () => (
       <div className="bg-red-900/50 border border-red-700 text-red-200 px-4 py-3 rounded-lg my-4" role="alert">
         <strong className="font-bold">An error occurred:</strong>
@@ -223,7 +256,7 @@ export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin })
       <div className="bg-slate-800 rounded-xl shadow-2xl overflow-hidden ring-1 ring-slate-700">
         <div className="p-4 sm:p-6">
           <div className="flex items-center justify-between mb-6">
-            <button onClick={() => handleMonthChange(-1)} className="p-2 rounded-full text-slate-400 hover:bg-slate-700 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed" aria-label="Previous month" disabled={isFirstMonth}>
+            <button onClick={() => handleMonthChange(-1)} className="p-2 rounded-full text-slate-400 hover:bg-slate-700 hover:text-white transition-colors" aria-label="Previous month">
               <ChevronLeftIcon />
             </button>
             <h2 className="text-xl sm:text-2xl font-bold text-slate-100 tracking-wide">
@@ -262,22 +295,29 @@ export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin })
                 {members.map(member => (
                   <tr key={member.id} className="hover:bg-slate-700/50 transition-colors">
                     <td className="sticky left-0 bg-slate-800 p-4 font-medium text-slate-100 whitespace-nowrap">
-                       {editingMemberId === member.id && isAdmin ? (
-                          <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); handleSaveName(member.id); }}>
-                            <input
-                              type="text"
-                              value={editingMemberName}
-                              onChange={(e) => setEditingMemberName(e.target.value)}
-                              className="bg-slate-900 border border-slate-600 rounded-md px-2 py-1 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                              autoFocus
-                              onBlur={() => handleSaveName(member.id)}
-                            />
-                          </form>
-                        ) : (
-                          <span onDoubleClick={() => handleStartEdit(member)} className={isAdmin ? 'cursor-pointer hover:text-indigo-400' : ''}>
-                            {member.name}
-                          </span>
-                        )}
+                       <div className="flex items-center justify-between">
+                           {editingMemberId === member.id && isAdmin ? (
+                              <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); handleSaveName(member.id); }}>
+                                <input
+                                  type="text"
+                                  value={editingMemberName}
+                                  onChange={(e) => setEditingMemberName(e.target.value)}
+                                  className="bg-slate-900 border border-slate-600 rounded-md px-2 py-1 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                  autoFocus
+                                  onBlur={() => handleSaveName(member.id)}
+                                />
+                              </form>
+                            ) : (
+                              <span onDoubleClick={() => handleStartEdit(member)} className={isAdmin ? 'cursor-pointer hover:text-indigo-400' : ''}>
+                                {member.name}
+                              </span>
+                            )}
+                            {isAdmin && (
+                                <button onClick={() => handleDeleteMember(member.id)} className="text-slate-500 hover:text-red-500 ml-2">
+                                    <TrashIcon />
+                                </button>
+                            )}
+                        </div>
                     </td>
                     {thursdaysInMonth.map(date => {
                       const dateKey = formatDateKey(date);
@@ -327,6 +367,13 @@ export const AttendanceTracker: React.FC<AttendanceTrackerProps> = ({ isAdmin })
               </>
             )}
         </div>
+        <ConfirmationModal
+            isOpen={isDeleteModalOpen}
+            onClose={() => setIsDeleteModalOpen(false)}
+            onConfirm={confirmDeleteMember}
+            title="Confirm Deletion"
+            message="Are you sure you want to delete this member? This action cannot be undone."
+        />
       </div>
     );
 };
